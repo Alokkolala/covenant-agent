@@ -15,3 +15,4 @@ traces/
 submission.json
 *.tmp
 blindtest/
+submission*.json
