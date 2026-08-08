@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# competition datasets - never commit. The private set drops Aug 9 and must not
+# leave this machine; the open set is the organizers' to distribute, not ours.
+agentic-bank-public/
+agentic-bank-private/
+data/
+
+# run outputs
+traces/
+submission.json
+*.tmp
+blindtest/
