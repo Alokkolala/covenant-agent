@@ -44,7 +44,7 @@ from datetime import datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from pathlib import Path
 
-import fitz
+import pymupdf as fitz
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
@@ -86,7 +86,8 @@ class Toolbox:
         parts = packet.find(box)
         self.box, self.scenario = box, scenario
         self.docs = {p.stem: p for p in sorted(parts["documents"].glob("*.pdf"))}
-        self.ledger = list(csv.DictReader(open(parts["ledger"], encoding="utf-8-sig")))
+        with parts["ledger"].open(encoding="utf-8-sig") as ledger:
+            self.ledger = list(csv.DictReader(ledger))
         self.account = packet.account_of(scenario, box)
         self.seen = packet.seen_counts(self.ledger)
         self.txn_ids = {r["txn_id"] for r in self.ledger if r["account_id"] == self.account}
@@ -656,6 +657,7 @@ def self_check() -> None:
         pix.clear_with(220)
         doc.new_page().insert_image(fitz.Rect(36, 36, 436, 336), pixmap=pix)
         doc.save(box / "documents" / "deadbeef.pdf")
+        doc.close()
         with open(box / "master_ledger.csv", "w", encoding="utf-8", newline="") as f:
             w = csv.writer(f)
             w.writerow(["txn_id", "account_id", "date", "amount", "currency",
