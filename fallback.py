@@ -42,7 +42,7 @@ DEFAULT = ("COMPLIANT", 1000000.00)
 # cells are priors, not model output, but the submission is overwhelmingly agent
 # work by the time it ships; overridden per-run by agent.py --model.
 TEAM = {"team": "Talents", "contact_email": "alokkolala2@gmail.com",
-        "model": "anthropic/claude-opus-5 via OpenRouter"}
+        "model": "openai/gpt-5.6-luna via OpenRouter"}
 
 
 def build(template: dict) -> dict:

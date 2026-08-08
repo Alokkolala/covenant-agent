@@ -21,10 +21,11 @@ split is not stylistic: over eighteen hand-scored cells the code never
 mis-categorised a ledger row and an agent doing it semantically got it wrong three
 times.
 
-Provider is OpenRouter (there is no Anthropic key), reached with the `openai` SDK
-pointed at its base_url. Prompt caching on Anthropic models there is not automatic
-- it is switched on per message block, below, and the cache figures are reported
-after every run rather than assumed.
+Provider is OpenRouter, reached with the `openai` SDK pointed at its base_url.
+Any tool-and-vision model there will do; `--model` switches it. Prompt caching is
+asked for differently per provider - OpenAI caches automatically, Anthropic must
+be told per message block - so `_cached()` decides from the slug, and the cache
+figures are reported from `usage` after every run rather than assumed.
 """
 from __future__ import annotations
 
@@ -55,7 +56,7 @@ import packet  # noqa: E402
 from pipeline import ingest, ocr  # noqa: E402
 
 BASE_URL = "https://openrouter.ai/api/v1"
-MODEL = "anthropic/claude-opus-5"
+MODEL = "openai/gpt-5.6-luna"
 CENTS = Decimal("0.01")
 STATUSES = ("COMPLIANT", "BREACH")
 NO_TEXT = 60  # chars: below this a page carrying images is a raster, not text
@@ -402,16 +403,24 @@ proposal to check against the descriptions, not an answer.
 
 # ------------------------------------------------------------------ the loop
 
-def _cached(part: dict) -> dict:
-    """Mark a content block as a cache breakpoint.
+def _cached(part: dict, model: str) -> dict:
+    """Mark a content block as a cache breakpoint, where the provider wants one.
 
-    Caching is NOT automatic for Anthropic models on OpenRouter; without this the
-    ~20KB protocol and the ~30KB brief are re-read at full price on every turn of
-    every tool loop. Two breakpoints of the four allowed: end of the system
-    prompt, end of the first user message. Both are stable for the whole run, so
-    every turn after the first reads them at 0.1x. Whether it is actually working
-    is reported from `usage`, not assumed.
+    The ~20KB protocol and the ~17KB brief are resent on every turn of every tool
+    loop, so caching them is the difference between paying for them once and
+    paying ~40 times. How you ask for it depends on who is answering:
+
+    - **Anthropic** on OpenRouter does NOT cache automatically. It must be asked,
+      per content block. Two breakpoints of the four allowed: end of the system
+      prompt, end of the first user message. Both are stable for the whole run.
+    - **OpenAI** caches automatically above ~1K tokens and takes no such field.
+      Sending one is at best ignored, so it is not sent.
+
+    Either way the run reports what actually happened from `usage`, because a
+    cache you believe in and do not have is the expensive kind.
     """
+    if not model.startswith("anthropic/"):
+        return part
     return {**part, "cache_control": {"type": "ephemeral"}}
 
 
@@ -461,8 +470,10 @@ def solve(box: Path, scenario: str, cfg, client) -> dict:
     task = TASK.format(scenario=scenario, account=tb.account, clauses=tb.clauses,
                        case=tb.case, brief=tb.brief)
     messages = [
-        {"role": "system", "content": [_cached({"type": "text", "text": protocol})]},
-        {"role": "user", "content": [_cached({"type": "text", "text": task})]},
+        {"role": "system",
+         "content": [_cached({"type": "text", "text": protocol}, cfg.model)]},
+        {"role": "user",
+         "content": [_cached({"type": "text", "text": task}, cfg.model)]},
     ]
     log({"event": "start", "scenario": scenario, "account": tb.account,
          "model": cfg.model, "system": protocol[:400] + "...", "task": task[:1200] + "..."})
@@ -602,9 +613,15 @@ def run(cfg) -> int:
     return 0
 
 
-# Published OpenRouter rates, $/1M tokens. Cache reads are 0.1x; cache writes 1.25x,
-# which this does not model - it is an estimate for the window, not an invoice.
-RATES = {"anthropic/claude-opus-5": (5.0, 25.0), "anthropic/claude-sonnet-5": (2.0, 10.0)}
+# Published OpenRouter rates, $/1M tokens (in, out). Cache reads are 0.1x of input
+# on every model here; cache writes are 1.25x, which this does not model - it is an
+# estimate for the window, not an invoice. Refresh from /api/v1/models if in doubt.
+RATES = {
+    "openai/gpt-5.6-luna": (0.10, 0.60),
+    "openai/gpt-5.6-luna-pro": (0.10, 0.60),
+    "anthropic/claude-opus-5": (5.0, 25.0),
+    "anthropic/claude-sonnet-5": (2.0, 10.0),
+}
 
 
 def report_spend(spend: list[dict], secs: float, model: str) -> None:
@@ -703,7 +720,8 @@ def self_check() -> None:
                     assert any(isinstance(m.get("content"), list)
                                and any(p.get("type") == "image_url" for p in m["content"])
                                for m in messages), "rendered page never reached the model"
-                assert messages[0]["content"][0]["cache_control"]["type"] == "ephemeral"
+                assert "cache_control" not in messages[0]["content"][0], \
+                    "OpenAI caches automatically and takes no cache_control field"
                 calls = [NS(id=f"c{self.n}{i}", type="function",
                             function=NS(name=n, arguments=json.dumps(a)))
                          for i, (n, a) in enumerate(script[self.n])]
@@ -713,7 +731,13 @@ def self_check() -> None:
                                    prompt_tokens_details=NS(cached_tokens=90),
                                    model_dump_json=lambda: '{"prompt_tokens":100}'))
 
-        cfg = NS(model="stub", max_tokens=100, timeout=10, retries=1, max_turns=20)
+        # Ask for the cache the way each provider wants it. Getting this backwards
+        # is silent and expensive: the protocol and the brief are resent every turn.
+        block = {"type": "text", "text": "x"}
+        assert _cached(block, "anthropic/claude-opus-5")["cache_control"]["type"] == "ephemeral"
+        assert "cache_control" not in _cached(block, "openai/gpt-5.6-luna")
+
+        cfg = NS(model=MODEL, max_tokens=100, timeout=10, retries=1, max_turns=20)
         real_dispatch = Toolbox.dispatch
 
         def spy(self, name, raw):

@@ -21,7 +21,7 @@ That's the whole runbook: priors → packets → agents → collected submission
 and it fills only what's missing.
 
 ```
---model         default anthropic/claude-opus-5
+--model         default openai/gpt-5.6-luna
 --scenario      repeatable; default is every borrower
 --concurrency   default 4
 --max-turns     cap per borrower; whatever is filed by then is kept
@@ -80,10 +80,18 @@ description at the moment it's about to make the mistake:
 
 ## Provider
 
-OpenRouter, via the `openai` SDK pointed at its base URL. Prompt caching is *not* automatic
-for Anthropic models there — it's enabled per-message on two stable breakpoints, and the run
-prints the real cache figures from `usage` rather than assuming it worked. Retries are
-stdlib backoff.
+OpenRouter, via the `openai` SDK pointed at its base URL — it's OpenAI-compatible, so no
+provider-specific client is needed. The default is `openai/gpt-5.6-luna`; anything on
+OpenRouter with tool calling and image input will work, so `--model` is a real switch and
+not a formality.
+
+Prompt caching is asked for differently depending on who answers: OpenAI caches
+automatically, Anthropic has to be told per message block. `_cached()` decides from the
+slug. The protocol and the ledger brief are resent on every turn of the tool loop, so
+getting this wrong is silent and costs roughly 40× on the input — which is why the run
+prints the real cache figures from the API's `usage` instead of assuming.
+
+Retries are stdlib exponential backoff.
 
 ## Verify
 
