@@ -16,3 +16,4 @@ submission.json
 *.tmp
 blindtest/
 submission*.json
+ocr_cache/

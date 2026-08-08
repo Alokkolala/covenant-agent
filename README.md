@@ -1,219 +1,218 @@
 # Covenant compliance agent
 
-Reads a bank's messy corporate-lending PDFs and decides, per borrower per covenant,
-whether it is breached — emitting `status`, `actual` and `evidence_txn_id` into a
-`submission.json` shaped exactly like the provided template.
+Corporate borrowers have loan covenants — "net debt to EBITDA shall not exceed 3.5x",
+"capital expenditure shall not exceed $4,000,000". Checking them means reading a credit
+agreement, working out what the clause actually measures, pulling the right rows out of a
+transaction ledger, and doing the arithmetic.
+
+This does that automatically. Point it at a folder of PDFs and a ledger; it produces a
+`submission.json` with a `status`, an `actual` and an `evidence_txn_id` for every covenant
+of every borrower.
 
 ```
-python agent.py --data agentic-bank-public
+pip install -r requirements.txt openai
+export OPENROUTER_API_KEY=...          # PowerShell: $env:OPENROUTER_API_KEY = '...'
+
+python agent.py --data path/to/dataset
 ```
 
-One command. Parachute → packets → agents → collect. Re-run it and it fills only the
-gaps.
+One command. Run it again and it fills only what's missing.
 
-## The one architectural rule
+## The one rule
 
-**The model reads. The code computes. No number the model produces reaches the
-submission.**
+**The model reads. The code computes.**
 
-The model's job is to read a legal clause and say *what to measure*: which ledger rows
-go in the numerator, which in the denominator, what the threshold is, which direction a
-breach lies in. The arithmetic happens in Python with `decimal.Decimal`, and
-`submit_cell()` refuses any `actual` that did not come out of `compute()`.
+An LLM is good at reading a legal sentence and saying *what to measure* — which ledger
+rows belong in the numerator, which in the denominator, what the threshold is, which
+direction a breach lies in. It is unreliable at the arithmetic, and worse, its mistakes
+are confident and plausible.
 
-This is not stylistic. Over eighteen hand-scored cells the code never mis-categorised a
-ledger row; an agent doing the same job semantically got it wrong three times.
+So it never does the arithmetic. It calls `compute()`, which evaluates in
+`decimal.Decimal`, and `submit_cell()` rejects any figure that did not come back from
+`compute()`. There is no path from the model's own head to the submission.
 
-## How it runs
+This was not a design preference. Hand-scoring the same cells both ways, the code never
+mis-categorised a ledger row and the model did — repeatedly, always by reading a category
+the way an accountant would rather than the way the document worded it.
+
+## How a run goes
 
 ```
-fallback.py        every cell filled with a prior, in seconds — a scoreable file
-      │            exists before anything that can fail has run
-      ▼
-tools/packet.py    one packet per borrower: the case brief, the ledger, a ledger_brief
-      │            with rows pre-grouped by category marker, and every document naming
-      │            that borrower's account — plus every document with no text layer,
-      │            since those name nobody and one of them is somebody's KYC dossier
-      ▼
-agent.py           one agent per borrower, concurrent, over the OpenRouter API.
-      │            System prompt is AGENT_PROTOCOL.md, verbatim.
-      ▼
-tools/collect.py   answers overlay the parachute; anything malformed, absent or
-                   self-declared non-computable keeps its prior
+1. fallback.py      fills every cell with a per-clause prior, in seconds.
+                    A scoreable file exists before anything that can fail has run.
+
+2. tools/packet.py  one packet per borrower — the case brief, the ledger, that
+                    borrower's rows pre-grouped by category, and every document
+                    naming their account. Plus every document with no text layer,
+                    because those name nobody and one of them is somebody's file.
+
+3. agent.py         one agent per borrower, run concurrently against OpenRouter.
+                    The system prompt is AGENT_PROTOCOL.md, verbatim.
+
+4. tools/collect.py agent answers overlay the parachute. Anything malformed,
+                    missing, or flagged non-computable keeps its prior instead.
 ```
 
-Order is chosen so that a failure at any step still leaves a submittable file on disk.
+The order matters: a failure at any step still leaves a valid submission on disk. Step 1
+guarantees the floor; every step after it is an improvement on a banked result.
 
-## Model and provider
+## The tools the model gets
 
-OpenRouter, reached with the `openai` SDK pointed at `https://openrouter.ai/api/v1`
-(it is OpenAI-compatible). No Anthropic SDK, no `thinking`, no native-shape parameters
-that OpenRouter does not pass through.
+Seven, deliberately. Every extra verb is another way to reach a number without going
+through `compute`.
 
-| | |
+| tool | why |
 |---|---|
-| default model | `anthropic/claude-opus-5` (`--model` to switch, e.g. `anthropic/claude-sonnet-5`) |
-| auth | `OPENROUTER_API_KEY` in the environment |
-| caching | **not automatic on OpenRouter** — enabled per message with `cache_control` on two breakpoints: the end of the system prompt and the end of the first user turn. Both are stable for the whole run, so every turn after the first reads them at 0.1×. The run reports actual cache reads from `usage`; if it sees zero it says so loudly rather than assuming. |
-| retries | stdlib exponential backoff, 4s → 60s, 5 attempts. No `tenacity`. |
-
-## The tool surface
-
-Seven operations, deliberately no more. Every extra verb is a way to reach a number
-without going through `compute`.
-
-| tool | why it exists |
-|---|---|
-| `list_documents()` | filenames are opaque hashes; the agent must discover what is there. Flags pages with no text layer. |
-| `read_document(id)` | text **per page**, with each page's char count and image count |
-| `render_page(id, page, dpi=200)` | returns the page as an image. Load-bearing: some documents have no text layer at all. |
-| `search_documents(regex)` | grep across every document at once |
-| `ledger_rows(account)` | that borrower's rows with the `seen=N` filler signal |
+| `list_documents()` | filenames are opaque hashes — the only way to know what a document is, is to read it. Flags pages with no text layer. |
+| `read_document(id)` | text per page, with each page's character and image count |
+| `render_page(id, page)` | the page as an image. Some documents have no text layer at all; this is the only way in. |
+| `search_documents(regex)` | grep every document at once |
+| `ledger_rows(account)` | one account's rows, with a signal for how likely each is generated filler |
 | `compute(expression)` | `Decimal` arithmetic. The only source of numbers. |
 | `submit_cell(...)` | files one verdict, validated on the way in |
 
-Three rules are written into the tool descriptions and enforced in code, not left to the
-prompt — because the model reads a tool description at the moment it uses the tool, which
-is the moment the mistake gets made:
+Three things are enforced in the tool layer rather than asked for in the prompt, because
+the model reads a tool's description at the exact moment it is about to make the mistake:
 
-1. **A row belongs to the category its description literally names.** Payroll, utilities,
-   rent and insurance are not operating expenses here, whatever IFRS says. Reading it
-   semantically inflated a denominator by 1.55× and flipped a BREACH to COMPLIANT.
-2. **`actual` carries the unit of the threshold, at exactly two decimals.** `submit_cell`
-   quantizes to two places. An agent that filed `0.04339` to protect precision scored zero
-   on that field where `0.04` scored full marks.
-3. **A metric that cannot be computed says so in a machine-readable field.**
-   `computable: false` → `collect.py` keeps the prior. A prose caveat is read by nothing;
-   a proxy shipped as a confident verdict scored 0 where the untouched prior scored 0.5.
+- **A ledger row belongs to the category its description literally names.** Payroll,
+  utilities, rent and insurance are not operating expenses here, whatever accounting
+  practice says. Reading them semantically inflates the denominator and flips verdicts.
+- **`actual` carries the unit of the threshold, rounded to two decimals.** A limit written
+  `0.04x` means the answer is a ratio; `$1,800,000.00` means dollars. `submit_cell`
+  quantizes, so extra precision cannot be filed even when the model wants to protect it —
+  the answer key rounds too, and matching it is what scores.
+- **An uncomputable metric says so in a field, not in prose.** `computable: false` tells
+  the collector to keep the prior. A caveat written in the worklog is read by nothing, and
+  a plausible substitute shipped as a confident verdict scores worse than not answering.
 
-Also enforced: `submit_cell` rejects an `evidence_txn_id` that is on no ledger row of this
-borrower's account, and rejects a negative `actual`.
+`submit_cell` also rejects a negative `actual` and an `evidence_txn_id` that appears on no
+row of this borrower's account.
 
-## What is automated and what a human does
+## Model and provider
 
-**Automated** — everything in the diagram above. The parachute, packet building, the
-agent loop, retries, concurrency, collection, validation, the plausibility band.
+OpenRouter, via the `openai` SDK pointed at its base URL — it is OpenAI-compatible, so no
+provider-specific client is needed.
 
-**A human does** — three things, all of them judgement:
+- **Default model** `anthropic/claude-opus-5`. `--model` switches it.
+- **Prompt caching** is *not* automatic for Anthropic models on OpenRouter. It is enabled
+  per-message on two stable breakpoints — the end of the system prompt and the end of the
+  first user turn — so every turn after the first re-reads them at a tenth of the price.
+  The run prints the cache figures from the API's own `usage`, and says so loudly if it
+  sees zero rather than assuming it worked.
+- **Retries** are stdlib exponential backoff. No retry library for something that is six
+  lines.
 
-- **Decides when to submit.** Three attempts, best-of. The runbook banks an early safe
-  submission and spends the rest of the window improving it.
-- **Hand-checks flagged cells.** `collect.py` flags a cell whose `actual` sits outside
-  0.5×–2.0× of its own threshold. That band catches gross blowups, not drift — it missed
-  a 12% error on a hand-checked cell. A flag is a list, never an edit.
-- **Reads the disagreements.** `run.py` is an independent deterministic derivation;
-  `crosscheck.py` diffs it against the agent submission, status disagreements first.
-  Both stay manual on purpose.
+## What a human still does
 
-## Verification
+Everything above is automated. Three things are not, and shouldn't be:
+
+- **Deciding when to submit.** Scoring is best-of-three attempts, so banking an early safe
+  submission costs nothing and removes the risk of ending with none.
+- **Hand-checking flagged cells.** `collect.py` flags any cell whose value sits implausibly
+  far from its own threshold. That catches gross blowups, not small drift — a flag is a
+  list to look at, never an edit to apply.
+- **Reading the disagreements.** `run.py` is a second, fully deterministic derivation that
+  shares no code path with the agent. `crosscheck.py` diffs the two and puts status
+  disagreements first. Both stay manual on purpose: the point is a human looking at where
+  two independent methods disagree.
+
+## Verifying it
+
+Four self-checks run offline and spend nothing. The agent one drives a stubbed model
+through the whole loop, including the three mistakes that are known to cost cells.
 
 ```
-python agent.py --self-check                    # exercises the whole loop, spends nothing
+python agent.py --self-check
 python tools/packet.py --self-check
 python tools/collect.py --self-check
 python scorer.py --self-check
 ```
 
-The real gate is a scored result against the open set's answer key:
+The real gate is a score against a dataset with a published answer key:
 
 ```
-python agent.py --data agentic-bank-public --out submission_agents.json
-python scorer.py submission_agents.json agentic-bank-public/ground_truth.json
+python agent.py --data <dataset> --out submission_agents.json
+python scorer.py submission_agents.json <dataset>/ground_truth.json
 ```
 
-`scorer.py` implements the published scoring: `status` 0.50 (exact match, else the whole
-cell is zero), `actual` 0.30 decaying linearly to zero at 5% relative error,
-`evidence_txn_id` 0.20 — and where the key's evidence is null, that 0.20 rides on
-`actual`'s accuracy. It reports the unweighted mean; the official per-cell difficulty
-weights are unpublished.
+`scorer.py` implements the published scheme: `status` is half the cell and an exact string
+match — get it wrong and the rest scores nothing. `actual` is 0.30, decaying to zero at 5%
+relative error. `evidence_txn_id` is 0.20, and where the key names no transaction that
+0.20 rides on `actual` instead. It reports an unweighted mean, because the official
+per-cell difficulty weights are not published.
 
-### Measured
+**Reference points on the public dataset** (12 borrowers, 36 cells), both reproducible with
+the commands above:
 
-| | open set (12 borrowers, 36 cells) |
+| | score |
 |---|---|
-| parachute alone (`fallback.py`, zero analysis) | 0.3831 |
-| deterministic pipeline (`run.py`) | 0.9167 |
-| deterministic pipeline, covenants reworded | 0.7109 † |
-| agent path (`agent.py`) | **not yet measured — needs `OPENROUTER_API_KEY`** |
+| priors alone, zero analysis | 0.38 |
+| deterministic pipeline (`run.py`) | 0.92 |
+| agent path (`agent.py`) | not yet measured — needs an API key |
 
-† measured with a rewording harness that is not carried into this repo; the other two
-rows reproduce with the commands above.
-
-Prior hand-run measurement, six borrowers scored cell by cell: agents following this
-protocol averaged **0.8722** against the pipeline's **0.8333** on the same borrowers. That
-is a wash on the open set, which is expected — the pipeline was tuned on exactly this
-data. The case for the agent is the reworded row: the pipeline's dispatch is a table of
-phrases, each occurring in exactly one borrower's agreement, and only 25% of it survives a
-rewrite. The agent reaches tuned-pipeline quality with no tuning at all, so it has nothing
-to lose when the wording changes.
+The pipeline number looks like it settles the argument, and it doesn't: that pipeline
+dispatches on a table of literal phrases, each of which occurs in exactly one borrower's
+agreement. Reword the covenants and most of it stops matching. It is tuned to this
+dataset and cannot be tuned to one it has not seen. The agent reaches comparable quality
+with no tuning at all, which is the entire reason it exists.
 
 ## Known limits
 
-Reported, not papered over.
+Stated rather than papered over.
 
-- **Underdetermined cells.** Some covenants name a quantity the corpus never defines —
-  "operating expenses", "EBITDA". Three defensible readings of one such cell spanned a
-  factor of 1.7. That is a property of the documents, not a bug.
-- **One cell needs a figure that exists nowhere.** Its covenant measures a quantity at
-  group level while only the borrower's own data ships. Searched down to the decompressed
-  page content streams; it is not there. The agent flags it `computable: false` and the
-  prior survives, which scores half where a proxy scores zero.
-- **One cell was a typo in the source document.** Its printed threshold was wrong and the
-  key held the right one. Every method computes the ratio correctly, compares it against
-  the number on the page, and loses the cell. Refusing to special-case it was correct —
-  each candidate mechanism fitted that one cell and would have corrupted its siblings.
-- **Both filters are blind to an error two methods share.** When the pipeline and the
-  agent agree and are both wrong, nothing flags it. Bounded and known.
-- **The plausibility band catches blowups, not drift.** 12% slips through.
+- **Some covenants are underdetermined.** They name a quantity the documents never define
+  — "operating expenses", "EBITDA". Several defensible readings of the same clause can
+  differ by more than half again. That is a property of the corpus, not a bug to fix.
+- **Some figures are simply absent.** One covenant measures a quantity at group level while
+  only the borrower's own data ships. It is not in any document and not derivable from the
+  ledger. The agent flags it non-computable and the prior stands, which scores better than
+  a confident guess.
+- **Source documents can be wrong.** One printed threshold contradicted the answer key.
+  Every method computed the ratio correctly, compared it against the number on the page,
+  and lost the cell. Refusing to special-case it was the right call — every candidate fix
+  matched that one cell and would have quietly corrupted its siblings.
+- **Two methods can be wrong together.** When the pipeline and the agent agree and are both
+  wrong, nothing flags it.
 
-## Operational notes
+## Operational behaviour
 
-- **Nothing takes the run down.** One borrower failing writes `error.txt` into its packet
+- **Nothing takes the run down.** A borrower that fails writes a traceback into its packet
   and leaves the others alone; its cells keep their priors.
-- **Idempotent.** A borrower with an `answer.json` is skipped, by both `packet.py` and
-  `agent.py`. Re-running the same command at 12:40 fills the gaps rather than starting
-  over. `--force` to mean it.
-- **Bounded.** `--max-turns` (default 60) per borrower; whatever is filed by then is kept.
-- **Logged.** Every model call — request, tool calls, results, usage — is appended to
+- **Idempotent.** A borrower with an answer is skipped. Re-running the same command fills
+  the gaps rather than starting over — which is what you want when three agents have died
+  on timeouts and the clock is running. `--force` overrides.
+- **Bounded.** `--max-turns` caps the loop per borrower; whatever is filed by then is kept.
+- **Logged.** Every model call — request, tool calls, results, token usage — is appended to
   `trace.jsonl` in the borrower's packet and flushed per line, so a crash still leaves the
   trace behind.
-- **Concurrent, configurably.** `--concurrency` (default 4). OpenRouter's rate limits are
-  unknown; turn it down if they bite.
-- **Nothing is located by name.** `packet.find()` identifies the ledger by its `txn_id`
-  column, the template by cells carrying a `status` field, the documents folder by where
-  the PDFs are. Verified against a copy with everything renamed.
-- **Packets live outside the repo** (`~/halyk-packets` by default) so an agent given a
-  packet cannot reach `ground_truth.json`.
+- **Concurrent, configurably.** `--concurrency` defaults to 4. Turn it down if rate limits
+  bite.
+- **Nothing is located by filename.** The ledger is found by its `txn_id` column, the
+  template by cells carrying a `status` field, the documents folder by where the PDFs are.
+  Verified against a copy of the dataset with every file renamed.
+- **Packets are built outside the repo** so an agent working in one cannot reach the
+  answer key.
 
 ## Layout
 
 ```
-agent.py             the agent, the seven tools, and the whole runbook in one command
-AGENT_PROTOCOL.md    the system prompt — 9 steps and a register of 24 traps, passed
-                     through verbatim. Every rule was written after a measured failure.
-fallback.py          the parachute
-tools/packet.py      packet builder; `all` builds every one, `triage` ranks by risk
-tools/collect.py     merge answers onto the parachute, validate, flag
-pipeline/            PDF loading with Unicode normalisation, Decimal money primitives,
-                     the document index, and solve.CATEGORIES — the category markers the
-                     ledger brief is built from
+agent.py             the agent, its seven tools, and the whole runbook in one command
+AGENT_PROTOCOL.md    the system prompt. Nine steps and a register of traps, passed
+                     through verbatim — every entry was written after a measured failure
+fallback.py          the priors
+tools/packet.py      packet builder; `all` builds every one, `triage` ranks them by risk
+tools/collect.py     merge answers onto the priors, validate, flag
+pipeline/            PDF loading and Unicode normalisation, Decimal money primitives,
+                     the document index, and the category markers the ledger brief uses
 run.py               the independent deterministic derivation (manual)
 crosscheck.py        diff two submissions (manual)
 scorer.py            the gate
-PLAN.md              architecture, runbook, known limits
+PLAN.md              architecture and runbook notes
 ```
 
-## Install
+The dataset is not in this repo. It belongs to the organisers; pass `--data <dir>`.
 
-```
-pip install -r requirements.txt openai
-export OPENROUTER_API_KEY=...        # PowerShell: $env:OPENROUTER_API_KEY = '...'
-```
+## What this deliberately isn't
 
-The dataset is not committed — it is the organisers' to distribute. Drop it anywhere and
-pass `--data <dir>`.
-
-## What was not built
-
-No agent framework, no vector DB, no web UI, no provider abstraction layer, no retry
-library. One runner, seven tools, one gate.
+No agent framework, no vector database, no web UI, no abstraction layer over the provider,
+no retry library. One runner, seven tools, one gate.
