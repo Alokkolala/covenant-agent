@@ -1,3 +1,4 @@
-# Deliberately tiny. No agent framework, no vector DB - see README "What we did not build".
-pymupdf>=1.24      # PDF text + tables + coordinates, and fixture generation
-pandas>=2.0        # only for .xlsx registries; everything else is stdlib csv/json
+# Deliberately tiny. No agent framework or vector database.
+pymupdf>=1.24
+pandas>=2.0
+openai>=1.0
