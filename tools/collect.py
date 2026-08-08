@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -37,8 +38,8 @@ def validate(cell: dict) -> str | None:
     if cell.get("status") not in STATUSES:
         return f"status {cell.get('status')!r} is not COMPLIANT/BREACH"
     a = cell.get("actual")
-    if isinstance(a, bool) or not isinstance(a, (int, float)):
-        return f"actual {a!r} is not a number"
+    if isinstance(a, bool) or not isinstance(a, (int, float)) or not math.isfinite(a):
+        return f"actual {a!r} is not a finite number"
     if a < 0:
         return f"actual {a} is negative"
     ev = cell.get("evidence_txn_id")
@@ -47,8 +48,10 @@ def validate(cell: dict) -> str | None:
     return None
 
 
-def collect(packets: Path, template: Path, out: Path) -> int:
+def collect(packets: Path, template: Path, out: Path, model: str | None = None) -> int:
     payload = fallback.build(json.loads(template.read_text(encoding="utf-8")))
+    if model:
+        payload["model"] = model
     cells = {s: dict(c) for s, c in payload["answers"].items()}
     taken, kept, flags, problems = 0, 0, [], []
 
@@ -96,9 +99,10 @@ def collect(packets: Path, template: Path, out: Path) -> int:
                 if not BAND[0] <= r <= BAND[1]:
                     flags.append(f"{scen}/{clause}: actual/threshold = {r:.2f}x, outside "
                                  f"{BAND[0]}-{BAND[1]}x")
-            # Underscore keys are working notes, never submitted.
             payload["answers"][scen][clause] = {
-                k: v for k, v in cell.items() if not k.startswith("_")
+                "status": cell["status"],
+                "actual": cell["actual"],
+                "evidence_txn_id": cell.get("evidence_txn_id"),
             }
             taken += 1
 
@@ -128,7 +132,8 @@ def demo() -> None:
         (d / "x1packet").mkdir()
         (d / "x1packet" / "answer.json").write_text(json.dumps({
             "6.1": {"status": "BREACH", "actual": 1.71, "evidence_txn_id": None,
-                    "_threshold": 1.70},                       # in band, submitted
+                    "_threshold": 1.70,
+                    "explanation": "must not leak"},          # in band, submitted
             "6.2": {"status": "COMPLIANT", "actual": 50.0, "evidence_txn_id": None,
                     "_threshold": 1.0},                        # 50x -> flagged, still taken
             "6.3": {"status": "MAYBE", "actual": 5.0, "evidence_txn_id": None},
@@ -151,13 +156,24 @@ def demo() -> None:
         }), encoding="utf-8")
         tpl["answers"]["X3"] = {"6.1": {"status": None, "actual": None,
                                         "evidence_txn_id": None}}
+        (d / "x4packet").mkdir()
+        (d / "x4packet" / "answer.json").write_text(json.dumps({
+            "6.1": {"status": "BREACH", "actual": float("nan"),
+                    "evidence_txn_id": None},
+        }), encoding="utf-8")
+        tpl["answers"]["X4"] = {"6.1": {"status": None, "actual": None,
+                                        "evidence_txn_id": None}}
         t = d / "tpl.json"
         t.write_text(json.dumps(tpl), encoding="utf-8")
         out = d / "sub.json"
-        collect(d, t, out)
-        answers = json.loads(out.read_text(encoding="utf-8"))["answers"]
+        collect(d, t, out, model="runtime-model via OpenRouter")
+        payload = json.loads(out.read_text(encoding="utf-8"))
+        answers = payload["answers"]
         got, proxy, wrapped = answers["X1"], answers["X2"]["6.1"], answers["X3"]["6.1"]
 
+    assert payload["model"] == "runtime-model via OpenRouter"
+    assert set(got["6.1"]) == {"status", "actual", "evidence_txn_id"}
+    assert answers["X4"]["6.1"]["actual"] == fallback.PRIORS["6.1"][1]
     assert wrapped["actual"] == 9.99, "a wrapped answer.json must still be collected"
     assert proxy["actual"] != 0.74, "a self-declared proxy must not reach the submission"
     assert proxy["status"] in STATUSES, "the prior must still fill the cell"
@@ -181,6 +197,7 @@ if __name__ == "__main__":
                     help="the dataset root; the template is located inside it by shape")
     ap.add_argument("--template", help="override if the template is somewhere else")
     ap.add_argument("--out", default=str(ROOT / "submission_agents.json"))
+    ap.add_argument("--model", help="model label to write at the top level")
     a = ap.parse_args()
     if a.template:
         template = Path(a.template)
@@ -188,4 +205,4 @@ if __name__ == "__main__":
         sys.path.insert(0, str(Path(__file__).parent))
         from packet import find  # same shape-based lookup the packets were built with
         template = find(Path(a.data))["template"]
-    raise SystemExit(collect(Path(a.packets), template, Path(a.out)))
+    raise SystemExit(collect(Path(a.packets), template, Path(a.out), model=a.model))
