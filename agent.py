@@ -566,7 +566,15 @@ def run(cfg) -> int:
     if skipped:
         say(f"[3/4] already answered, skipping: {' '.join(skipped)}")
     if todo:
-        client = make_client(cfg)
+        try:
+            client = make_client(cfg)
+        except SystemExit as e:
+            # No key, no network, no provider: skip the agents but STILL collect.
+            # Bailing here would drop answers already on disk from a previous
+            # partial run - which is exactly the case idempotence exists for.
+            say(f"[3/4] agents     SKIPPED: {e}")
+            todo = []
+    if todo:
         say(f"[3/4] agents     {cfg.model}, {cfg.concurrency} at a time: {' '.join(todo)}")
         t0 = time.time()
 
