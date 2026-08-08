@@ -38,8 +38,10 @@ def validate(cell: dict) -> str | None:
     if cell.get("status") not in STATUSES:
         return f"status {cell.get('status')!r} is not COMPLIANT/BREACH"
     a = cell.get("actual")
-    if isinstance(a, bool) or not isinstance(a, (int, float)) or not math.isfinite(a):
-        return f"actual {a!r} is not a finite number"
+    if isinstance(a, bool) or not isinstance(a, (int, float)):
+        return f"actual {a!r} is not a number"
+    if isinstance(a, float) and not math.isfinite(a):
+        return f"actual {a!r} is not finite"
     if a < 0:
         return f"actual {a} is negative"
     ev = cell.get("evidence_txn_id")
