@@ -23,7 +23,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-import fitz
+import pymupdf as fitz
 
 CACHE = Path(__file__).resolve().parents[1] / "ocr_cache"
 DPI = 200  # enough for 8-9pt body text; higher costs time for no accuracy gain

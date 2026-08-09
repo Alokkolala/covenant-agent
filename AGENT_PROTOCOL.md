@@ -18,9 +18,10 @@ Reject a document by a statement **inside it**, never by its filename, and never
 
 - **Two agreements per borrower.** One is superseded. It may carry a banner
   ("НЕДЕЙСТВУЮЩАЯ … НЕ ПРИМЕНЯЕТСЯ"), but do not rely on the banner — the wording can
-  change. **Diff the two Article 6 sections.** They are often identical except for one
-  threshold, and that one number flips a cell. Establish which edition governs from its
-  own covenant period.
+  change. **Diff the covenant sections containing the exact clause keys listed in your
+  task.** Covenant locations, numbering, and count can vary between borrowers. The two
+  editions are often identical except for one threshold, and that one number flips a cell.
+  Establish which edition governs from its own covenant period.
 - **Draft vs final auditor reports.** A draft ("ПРОЕКТ", "не является окончательной
   позицией аудитора") proposes reclassifications the final report may reject. Only the
   final counts. A draft has been observed proposing a reclassification of the exact
@@ -111,8 +112,9 @@ reliable alone:
 Copy the sentence that states the metric and the threshold, verbatim. Then write the
 metric as a formula.
 
-**Trap:** the clause number is only a cell address. The same number is a ratio for one
-borrower and a dollar amount for another. There is no generic "covenant 6.1". Read each.
+**Trap:** a clause identifier is only a cell address. The same identifier can be a ratio
+for one borrower and a dollar amount for another. It has no generic meaning. Read every
+requested clause.
 
 ## ④ Threshold, direction, and gating condition — three separate questions
 
@@ -225,7 +227,7 @@ dataset and would mislead on another.
 
 | # | Trap | Cost if missed | Detection | Step |
 |---|---|---|---|---|
-| 1 | Two agreements per borrower, one superseded | whole cell — the editions differed by **one threshold** and nothing else | diff both Article 6 sections; never trust the banner wording alone | ① |
+| 1 | Two agreements per borrower, one superseded | whole cell — the editions differed by **one threshold** and nothing else | diff the sections containing every requested clause key; never trust the banner wording alone | ① |
 | 2 | Draft auditor worksheet proposes a reclassification the final report rejects | two cells — the draft targeted the exact row another covenant rests on | the draft disclaims itself in its own text; only the final counts | ① |
 | 3 | Self-disclaiming "procedure" doc with near-miss identity | wrong KYC source | legal form one letter off (AG/JSC/LLP) + sub-account with a second dash that exists in no ledger row | ① |
 | 4 | Rasterised page **inside** an otherwise-text PDF | cell unsolvable — one carried the EBITDA add-backs | check text length **per page**, not per document | ① |

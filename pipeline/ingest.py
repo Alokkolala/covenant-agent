@@ -6,18 +6,17 @@ perfectly fine while silently losing whatever was on those pages.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
-import fitz  # PyMuPDF
+import pymupdf as fitz
 
 
 @dataclass
 class Page:
     number: int  # 1-indexed, as a human reads it
     text: str
-    tables: list = field(default_factory=list)
 
 
 @dataclass
@@ -83,14 +82,7 @@ def _load_pdf(path: Path) -> Doc:
             for i, page in enumerate(pdf, start=1):
                 page_images[i] = len(page.get_images())
                 text = normalize_text(page.get_text("text"))
-                tables = []
-                try:
-                    for t in page.find_tables().tables:
-                        tables.append([[normalize_text(c) if c else c for c in row]
-                                       for row in t.extract()])
-                except Exception:  # table finder is best-effort, never fatal
-                    pass
-                pages.append(Page(number=i, text=text, tables=tables))
+                pages.append(Page(number=i, text=text))
     except Exception as e:
         return Doc(doc_id=doc_id, path=str(path), pages=[], ok=False, note=f"unreadable: {e}")
 

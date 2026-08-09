@@ -44,7 +44,7 @@ from datetime import datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from pathlib import Path
 
-import fitz
+import pymupdf as fitz
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
@@ -86,7 +86,8 @@ class Toolbox:
         parts = packet.find(box)
         self.box, self.scenario = box, scenario
         self.docs = {p.stem: p for p in sorted(parts["documents"].glob("*.pdf"))}
-        self.ledger = list(csv.DictReader(open(parts["ledger"], encoding="utf-8-sig")))
+        with parts["ledger"].open(encoding="utf-8-sig") as ledger:
+            self.ledger = list(csv.DictReader(ledger))
         self.account = packet.account_of(scenario, box)
         self.seen = packet.seen_counts(self.ledger)
         self.txn_ids = {r["txn_id"] for r in self.ledger if r["account_id"] == self.account}
@@ -228,6 +229,8 @@ class Toolbox:
             value = Decimal(str(actual))
         except (InvalidOperation, ValueError):
             return f"actual {actual!r} is not a number"
+        if not value.is_finite():
+            return f"actual {actual!r} is not finite"
         if value < 0:
             return ("actual is the real value of the metric the covenant constrains and is "
                     "positive, even where the covenant is breached. Check the sign of the "
@@ -352,8 +355,8 @@ TOOLS = [
         "parameters": {"type": "object",
                        "required": ["clause", "status", "actual", "threshold"],
                        "properties": {
-            "clause": {"type": "string", "description": "the number the covenant is printed "
-                                                        "under, e.g. '6.2'"},
+            "clause": {"type": "string", "description":
+                       "the exact covenant key listed in this borrower's task"},
             "status": {"type": "string", "enum": list(STATUSES)},
             "actual": {"type": "number", "description":
                        "The real value of the metric the covenant constrains, positive, "
@@ -387,6 +390,9 @@ TASK = """You are solving the covenants of ONE borrower: scenario {scenario}, ac
 Fill exactly these cells: {clauses}. File each with `submit_cell` when you are finished
 with it — the run ends the moment the last one is filed, so do not file a draft and come
 back to it.
+
+These keys are addresses, not meanings. Find every exact key in the governing agreement
+wherever it appears. Never assume a particular article, numbering scheme, or number of covenants.
 
 Everything you need is reachable through the tools; there is no filesystem. Work the nine
 steps of the protocol in order. Below are the case brief, and a ledger brief in which the
@@ -593,7 +599,8 @@ def run(cfg) -> int:
             box = packets / f"{scen.lower()}packet"
             try:
                 u = solve(box, scen, cfg, client)
-                say(f"       {scen}: {u['filed']}/3 cells, {u['turns']} turns, "
+                say(f"       {scen}: {u['filed']}/{len(payload['answers'][scen])} cells, "
+                    f"{u['turns']} turns, "
                     f"{u['in']:,} in ({u['cached']:,} cached) / {u['out']:,} out")
                 return u
             except Exception as e:                                # noqa: BLE001
@@ -605,38 +612,21 @@ def run(cfg) -> int:
 
         with ThreadPoolExecutor(max_workers=cfg.concurrency) as pool:
             spend = list(pool.map(one, todo))
-        report_spend(spend, time.time() - t0, cfg.model)
+        report_spend(spend, time.time() - t0)
 
     # 4. Collect: answers overlay the parachute, anything malformed keeps its prior.
     say(f"[4/4] collect    -> {out}")
-    collect.collect(packets, template, out)
+    collect.collect(packets, template, out, model=f"{cfg.model} via OpenRouter")
     return 0
 
 
-# Published OpenRouter rates, $/1M tokens (in, out). Cache reads are 0.1x of input
-# on every model here; cache writes are 1.25x, which this does not model - it is an
-# estimate for the window, not an invoice. Refresh from /api/v1/models if in doubt.
-RATES = {
-    "openai/gpt-5.6-luna": (0.10, 0.60),
-    "openai/gpt-5.6-luna-pro": (0.10, 0.60),
-    "anthropic/claude-opus-5": (5.0, 25.0),
-    "anthropic/claude-sonnet-5": (2.0, 10.0),
-}
-
-
-def report_spend(spend: list[dict], secs: float, model: str) -> None:
+def report_spend(spend: list[dict], secs: float) -> None:
     tin = sum(s["in"] for s in spend)
     tout = sum(s["out"] for s in spend)
     cached = sum(s["cached"] for s in spend)
     ok = [s for s in spend if s["filed"]]
     say(f"\n       {len(ok)}/{len(spend)} borrowers answered in {secs / 60:.1f} min")
     say(f"       tokens: {tin:,} in ({cached:,} of them cache reads) / {tout:,} out")
-    if rate := RATES.get(model):
-        fresh = tin - cached
-        cost = (fresh * rate[0] + cached * rate[0] * 0.1 + tout * rate[1]) / 1e6
-        per = cost / max(1, len(spend))
-        say(f"       ≈ ${cost:.2f} for these {len(spend)}, ${per:.2f} each, "
-            f"${per * 12:.2f} for a full set of twelve")
     if tin and not cached:
         say("       WARNING: zero cache reads. Prompt caching is not working - the "
             "protocol and brief are being re-read at full price every turn.")
@@ -653,6 +643,11 @@ def self_check() -> None:
     import shutil
     import tempfile
     from types import SimpleNamespace as NS
+
+    protocol = (ROOT / "AGENT_PROTOCOL.md").read_text(encoding="utf-8")
+    assert "Article 6" not in protocol
+    assert "Covenant locations, numbering, and count can vary" in protocol
+    assert "Never assume a particular article, numbering scheme, or number of covenants" in TASK
 
     with tempfile.TemporaryDirectory() as tmp:
         box = Path(tmp) / "x1packet"
@@ -671,6 +666,7 @@ def self_check() -> None:
         pix.clear_with(220)
         doc.new_page().insert_image(fitz.Rect(36, 36, 436, 336), pixmap=pix)
         doc.save(box / "documents" / "deadbeef.pdf")
+        doc.close()
         with open(box / "master_ledger.csv", "w", encoding="utf-8", newline="") as f:
             w = csv.writer(f)
             w.writerow(["txn_id", "account_id", "date", "amount", "currency",
@@ -701,6 +697,8 @@ def self_check() -> None:
             [("submit_cell", {"clause": "6.1", "status": "BREACH", "actual": 0.04,
                               "evidence_txn_id": "TXN-X1-9999",
                               "threshold": 0.04})],               # invented evidence id
+            [("submit_cell", {"clause": "6.1", "status": "BREACH",
+                              "actual": float("nan"), "threshold": 0.04})],
             # and this one must land - it is p8packet's measured mistake verbatim,
             # six decimals where the key holds two. The code rounds it; the agent
             # cannot file 0.04339 however sure it is.
@@ -760,13 +758,14 @@ def self_check() -> None:
         assert "0.04 rounded to two decimals" in seen[6], seen[6]
         assert "status must be exactly" in seen[7], "bad status was accepted"
         assert "on no ledger row" in seen[8], "invented evidence id was accepted"
-        assert "filed 6.1" in seen[9], seen[9]
+        assert "is not finite" in seen[9], "non-finite actual was not rejected cleanly"
+        assert "filed 6.1" in seen[10], seen[10]
 
         cell = json.loads((box / "answer.json").read_text(encoding="utf-8"))["6.1"]
         assert cell == {"status": "BREACH", "actual": 0.04,
                         "evidence_txn_id": "TXN-X1-0001", "_threshold": 0.04}, cell
         assert used["filed"] == 1 and used["cached"] == 90 * used["turns"]
-        assert (box / "trace.jsonl").read_text(encoding="utf-8").count('"event": "tool"') == 10
+        assert (box / "trace.jsonl").read_text(encoding="utf-8").count('"event": "tool"') == 11
 
     print("agent self-check ok - loop, tools, 2dp rounding, compute gate, evidence check")
 

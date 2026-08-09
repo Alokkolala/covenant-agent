@@ -401,7 +401,8 @@ def main() -> int:
     payload = fallback.build(template)  # parachute first: every cell is now filled
     log(f"parachute: {sum(len(v) for v in payload['answers'].values())} cells")
 
-    ledger = list(csv.DictReader(open(root / "master_ledger_2025.csv", encoding="utf-8-sig")))
+    with (root / "master_ledger_2025.csv").open(encoding="utf-8-sig") as ledger_file:
+        ledger = list(csv.DictReader(ledger_file))
     scen2acc = {}
     for r in ledger:
         s = r["txn_id"].split("-")[1]

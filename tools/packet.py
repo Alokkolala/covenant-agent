@@ -44,7 +44,8 @@ def find(data: Path) -> dict[str, Path]:
 
     for f in sorted(data.rglob("*.csv")):
         try:
-            head = next(csv.DictReader(open(f, encoding="utf-8-sig")), None)
+            with f.open(encoding="utf-8-sig") as stream:
+                head = next(csv.DictReader(stream), None)
         except (UnicodeDecodeError, csv.Error):
             continue
         if head and "txn_id" in head and "account_id" in head:
@@ -83,8 +84,9 @@ def find(data: Path) -> dict[str, Path]:
 
 
 def account_of(scenario: str, data: Path) -> str:
-    rows = csv.DictReader(open(find(data)["ledger"], encoding="utf-8-sig"))
-    accs = {r["account_id"] for r in rows if r["txn_id"].split("-")[1] == scenario}
+    with find(data)["ledger"].open(encoding="utf-8-sig") as ledger:
+        accs = {r["account_id"] for r in csv.DictReader(ledger)
+                if r["txn_id"].split("-")[1] == scenario}
     if len(accs) != 1:
         raise SystemExit(f"{scenario}: expected exactly one account, found {sorted(accs)}")
     return accs.pop()
@@ -130,7 +132,8 @@ def brief(acc: str, data: Path) -> str:
     """
     from decimal import Decimal, InvalidOperation
 
-    every = list(csv.DictReader(open(find(data)["ledger"], encoding="utf-8-sig")))
+    with find(data)["ledger"].open(encoding="utf-8-sig") as ledger:
+        every = list(csv.DictReader(ledger))
     rows = [r for r in every if r["account_id"] == acc]
 
     # How often this description's wording recurs across the WHOLE file. Filler
@@ -235,14 +238,14 @@ def build(scenario: str, data: Path, out: Path, idx=None, force: bool = False) -
     if idx is None:
         idx = index.build(parts["documents"])
     # Every entry naming this account, regardless of the kind we assigned it.
-    picked = [e for e in idx.entries if e.account == acc]
+    picked = [e for e in idx.entries if acc in ingest.load_pdf(Path(e.path)).text]
     # A document with no text layer names no account, so it belongs to no packet -
     # and it is exactly the kind that is load-bearing. On this dataset four such
     # files exist and they hold one borrower's entire KYC dossier and another's
     # EBITDA adjustments; dropping them costs those cells silently. They are cheap
     # to carry, so every packet gets all of them and the agent renders and reads
     # them to find out whose they are.
-    blind = [e for e in idx.unreadable if e.account is None]
+    blind = [e for e in idx.unreadable if e.account is None and e not in picked]
     for e in picked + blind:
         shutil.copy2(e.path, box / "documents" / Path(e.path).name)
 
@@ -286,7 +289,7 @@ def risk(scenario: str, data: Path) -> tuple[int, list[str]]:
     from a document; a draft carries reclassifications that were never accepted.
     """
     import csv as _csv
-    import fitz
+    import pymupdf as fitz
 
     import run as engine
 
@@ -326,16 +329,17 @@ def risk(scenario: str, data: Path) -> tuple[int, list[str]]:
     for e in idx.entries:
         if e.account != acc:
             continue
-        doc = fitz.open(e.path)
-        if blanks := [i + 1 for i, p in enumerate(doc) if len(p.get_text().strip()) < 60]:
+        with fitz.open(e.path) as doc:
+            blanks = [i + 1 for i, p in enumerate(doc) if len(p.get_text().strip()) < 60]
+        if blanks:
             score += 3
             why.append(f"{Path(e.path).name}: no text layer on page(s) {blanks}")
         if e.kind == "cert_draft":
             score += 2
             why.append(f"{Path(e.path).name}: draft certificate")
 
-    rows = [r for r in _csv.DictReader(open(find(data)["ledger"], encoding="utf-8-sig"))
-            if r["account_id"] == acc]
+    with find(data)["ledger"].open(encoding="utf-8-sig") as ledger:
+        rows = [r for r in _csv.DictReader(ledger) if r["account_id"] == acc]
     if blank := [r["txn_id"] for r in rows if not r["amount"].strip()]:
         score += 5
         why.append(f"blank amount: {blank}")
@@ -407,16 +411,40 @@ def main() -> int:
 
 def demo() -> None:
     """Self-check: the packet must contain no answer key and no notes."""
-    box = build("P7", ROOT / "agentic-bank-public", Path.home() / "halyk-packets")
-    names = {p.name for p in box.rglob("*") if p.is_file()}
-    assert "ground_truth.json" not in names, "answer key leaked"
-    assert not names & {"TRAPS.md", "COVENANTS.md", "GOAL.md", "PLAN.md", "READINESS.md"}
-    assert "AGENT_PROTOCOL.md" in names and any(n.startswith("CASE") for n in names)
-    assert sum(1 for p in (box / "documents").iterdir()) >= 3
-    text = (box / "ledger_brief.md").read_text(encoding="utf-8")
-    assert "Every row, in full" in text, "the brief must list rows, not only totals"
-    assert "TXN-P7-0033" in text, "the borrower's rows must all appear"
-    assert "BLANK" in text, "a blank amount must be visible, not silently zero"
+    import tempfile
+
+    import pymupdf as fitz
+
+    with tempfile.TemporaryDirectory() as tmp:
+        data = Path(tmp) / "custom-data"
+        (data / "documents").mkdir(parents=True)
+        doc = fitz.open()
+        doc.new_page().insert_text((72, 72), "LOAN REFERENCE TELE-4471")
+        doc.save(data / "documents" / "custom.pdf")
+        doc.close()
+        with (data / "ledger.csv").open("w", encoding="utf-8", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["txn_id", "date", "account_id", "counterparty", "description",
+                        "amount", "currency"])
+            w.writerow(["TXN-Z9-0001", "2025-01-01", "TELE-4471", "Acme", "Revenue",
+                        "1.00", "USD"])
+        (data / "template.json").write_text(json.dumps({"answers": {"Z9": {
+            "9.4": {"status": None, "actual": None, "evidence_txn_id": None}}}}),
+            encoding="utf-8")
+        box = build("Z9", data, Path(tmp) / "custom-packets")
+        assert (box / "documents" / "custom.pdf").exists(), \
+            "documents must be matched against the ledger's exact account id"
+
+        box = build("P7", ROOT / "agentic-bank-public", Path(tmp))
+        names = {p.name for p in box.rglob("*") if p.is_file()}
+        assert "ground_truth.json" not in names, "answer key leaked"
+        assert not names & {"TRAPS.md", "COVENANTS.md", "GOAL.md", "PLAN.md", "READINESS.md"}
+        assert "AGENT_PROTOCOL.md" in names and any(n.startswith("CASE") for n in names)
+        assert sum(1 for p in (box / "documents").iterdir()) >= 3
+        text = (box / "ledger_brief.md").read_text(encoding="utf-8")
+        assert "Every row, in full" in text, "the brief must list rows, not only totals"
+        assert "TXN-P7-0033" in text, "the borrower's rows must all appear"
+        assert "BLANK" in text, "a blank amount must be visible, not silently zero"
     print("packet self-check ok")
 
 
