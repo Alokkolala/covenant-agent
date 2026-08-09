@@ -238,14 +238,14 @@ def build(scenario: str, data: Path, out: Path, idx=None, force: bool = False) -
     if idx is None:
         idx = index.build(parts["documents"])
     # Every entry naming this account, regardless of the kind we assigned it.
-    picked = [e for e in idx.entries if e.account == acc]
+    picked = [e for e in idx.entries if acc in ingest.load_pdf(Path(e.path)).text]
     # A document with no text layer names no account, so it belongs to no packet -
     # and it is exactly the kind that is load-bearing. On this dataset four such
     # files exist and they hold one borrower's entire KYC dossier and another's
     # EBITDA adjustments; dropping them costs those cells silently. They are cheap
     # to carry, so every packet gets all of them and the agent renders and reads
     # them to find out whose they are.
-    blind = [e for e in idx.unreadable if e.account is None]
+    blind = [e for e in idx.unreadable if e.account is None and e not in picked]
     for e in picked + blind:
         shutil.copy2(e.path, box / "documents" / Path(e.path).name)
 
@@ -413,7 +413,28 @@ def demo() -> None:
     """Self-check: the packet must contain no answer key and no notes."""
     import tempfile
 
+    import pymupdf as fitz
+
     with tempfile.TemporaryDirectory() as tmp:
+        data = Path(tmp) / "custom-data"
+        (data / "documents").mkdir(parents=True)
+        doc = fitz.open()
+        doc.new_page().insert_text((72, 72), "LOAN REFERENCE TELE-4471")
+        doc.save(data / "documents" / "custom.pdf")
+        doc.close()
+        with (data / "ledger.csv").open("w", encoding="utf-8", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["txn_id", "date", "account_id", "counterparty", "description",
+                        "amount", "currency"])
+            w.writerow(["TXN-Z9-0001", "2025-01-01", "TELE-4471", "Acme", "Revenue",
+                        "1.00", "USD"])
+        (data / "template.json").write_text(json.dumps({"answers": {"Z9": {
+            "9.4": {"status": None, "actual": None, "evidence_txn_id": None}}}}),
+            encoding="utf-8")
+        box = build("Z9", data, Path(tmp) / "custom-packets")
+        assert (box / "documents" / "custom.pdf").exists(), \
+            "documents must be matched against the ledger's exact account id"
+
         box = build("P7", ROOT / "agentic-bank-public", Path(tmp))
         names = {p.name for p in box.rglob("*") if p.is_file()}
         assert "ground_truth.json" not in names, "answer key leaked"

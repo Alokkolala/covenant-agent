@@ -355,8 +355,8 @@ TOOLS = [
         "parameters": {"type": "object",
                        "required": ["clause", "status", "actual", "threshold"],
                        "properties": {
-            "clause": {"type": "string", "description": "the number the covenant is printed "
-                                                        "under, e.g. '6.2'"},
+            "clause": {"type": "string", "description":
+                       "the exact covenant key listed in this borrower's task"},
             "status": {"type": "string", "enum": list(STATUSES)},
             "actual": {"type": "number", "description":
                        "The real value of the metric the covenant constrains, positive, "
@@ -390,6 +390,9 @@ TASK = """You are solving the covenants of ONE borrower: scenario {scenario}, ac
 Fill exactly these cells: {clauses}. File each with `submit_cell` when you are finished
 with it — the run ends the moment the last one is filed, so do not file a draft and come
 back to it.
+
+These keys are addresses, not meanings. Find every exact key in the governing agreement
+wherever it appears. Never assume a particular article, numbering scheme, or number of covenants.
 
 Everything you need is reachable through the tools; there is no filesystem. Work the nine
 steps of the protocol in order. Below are the case brief, and a ledger brief in which the
@@ -596,7 +599,8 @@ def run(cfg) -> int:
             box = packets / f"{scen.lower()}packet"
             try:
                 u = solve(box, scen, cfg, client)
-                say(f"       {scen}: {u['filed']}/3 cells, {u['turns']} turns, "
+                say(f"       {scen}: {u['filed']}/{len(payload['answers'][scen])} cells, "
+                    f"{u['turns']} turns, "
                     f"{u['in']:,} in ({u['cached']:,} cached) / {u['out']:,} out")
                 return u
             except Exception as e:                                # noqa: BLE001
@@ -639,6 +643,11 @@ def self_check() -> None:
     import shutil
     import tempfile
     from types import SimpleNamespace as NS
+
+    protocol = (ROOT / "AGENT_PROTOCOL.md").read_text(encoding="utf-8")
+    assert "Article 6" not in protocol
+    assert "Covenant locations, numbering, and count can vary" in protocol
+    assert "Never assume a particular article, numbering scheme, or number of covenants" in TASK
 
     with tempfile.TemporaryDirectory() as tmp:
         box = Path(tmp) / "x1packet"
